@@ -1,0 +1,775 @@
+
+#include <stdio.h>
+#include <string.h>
+#include <stdlib.h>
+#include <math.h>
+
+#define MAX 5
+#define N 3
+#define MAX_TERMS 256
+#define MAX_VARS 16
+#define MAX_PARAMS 16
+#define MAX_LAMBDA 10
+#define MAX_EQS 20
+char parametri[MAX_PARAMS]={'t','u','v','w','x','y','z'};
+typedef struct {
+    int coeff;
+    char vars[MAX_VARS]; // all variables except λ
+    int lambda_power;    // power of λ
+} Term;
+
+typedef struct {
+    Term terms[MAX_TERMS];
+    int count;
+} Poly;
+
+typedef struct {
+    int num_vars;
+    int num_params;
+
+    char var_names[MAX_VARS][2];     // x, y, z
+    char param_names[MAX_PARAMS][4]; // t0, t1, ...
+
+    double solution[MAX_VARS][MAX_PARAMS + 1];
+
+    int has_solution;   // 0 = inconsistent
+    int unique;         // 1 = unique, 0 = infinite
+} LinearSolution;
+
+
+/* ---------- Utilities ---------- */
+
+void remove_var(char *vars, char target) {
+    int r = 0, w = 0;
+    while (vars[r] != '\0') {
+        if (vars[r] != target) {
+            vars[w++] = vars[r];
+        }
+        r++;
+    }
+    vars[w] = '\0';
+}
+
+
+void sortVars(char *s) {
+    int n = strlen(s);
+    for (int i = 0; i < n; i++)
+        for (int j = i + 1; j < n; j++)
+            if (s[i] > s[j]) {
+                char t = s[i];
+                s[i] = s[j];
+                s[j] = t;
+            }
+}
+
+void simplify(Poly *p) {
+    for (int i = 0; i < p->count; i++) {
+        for (int j = i + 1; j < p->count; j++) {
+            if (p->terms[i].lambda_power == p->terms[j].lambda_power &&
+                strcmp(p->terms[i].vars, p->terms[j].vars) == 0) {
+                p->terms[i].coeff += p->terms[j].coeff;
+                p->terms[j] = p->terms[p->count - 1];
+                p->count--;
+                j--;
+            }
+        }
+    }
+}
+
+
+
+
+
+/* ---------- Polynomial constructors ---------- */
+Poly constant(int c) {
+    Poly p = {.count = 1};
+    p.terms[0].coeff = c;
+    p.terms[0].vars[0] = '\0';
+    p.terms[0].lambda_power = 0;
+    return p;
+}
+
+Poly variable(char v) {
+    Poly p = {.count = 1};
+    p.terms[0].coeff = 1;
+    if (v == 'l') { // lambda
+        p.terms[0].vars[0] = '\0';
+        p.terms[0].lambda_power = 1;
+    } else {
+        p.terms[0].vars[0] = v;
+        p.terms[0].vars[1] = '\0';
+        p.terms[0].lambda_power = 0;
+    }
+    return p;
+}
+
+/* ---------- Polynomial arithmetic ---------- */
+Poly add(Poly a, Poly b) {
+    Poly r = a;
+    for (int i = 0; i < b.count; i++)
+        r.terms[r.count++] = b.terms[i];
+    simplify(&r);
+    return r;
+}
+
+Poly sub(Poly a, Poly b) {
+    for (int i = 0; i < b.count; i++)
+        b.terms[i].coeff *= -1;
+    return add(a, b);
+}
+
+Poly mul(Poly a, Poly b) {
+    Poly r = {.count = 0};
+
+    for (int i = 0; i < a.count; i++) {
+        for (int j = 0; j < b.count; j++) {
+            Term t;
+            t.coeff = a.terms[i].coeff * b.terms[j].coeff;
+            strcpy(t.vars, a.terms[i].vars);
+            strcat(t.vars, b.terms[j].vars);
+            sortVars(t.vars);
+            t.lambda_power = a.terms[i].lambda_power + b.terms[j].lambda_power;
+            r.terms[r.count++] = t;
+        }
+    }
+    simplify(&r);
+    return r;
+}
+
+/* ---------- Determinant ---------- */
+Poly determinant(Poly matrix[MAX][MAX], int n) {
+    if (n == 1)
+        return matrix[0][0];
+
+    Poly det = constant(0);
+    int sign = 1;
+
+    for (int col = 0; col < n; col++) {
+        Poly minor[MAX][MAX];
+        int mi = 0, mj;
+
+        for (int i = 1; i < n; i++) {
+            mj = 0;
+            for (int j = 0; j < n; j++) {
+                if (j != col)
+                    minor[mi][mj++] = matrix[i][j];
+            }
+            mi++;
+        }
+
+        Poly subdet = determinant(minor, n - 1);
+        Poly term = mul(matrix[0][col], subdet);
+
+        if (sign == 1)
+            det = add(det, term);
+        else
+            det = sub(det, term);
+
+        sign = -sign;
+    }
+    return det;
+}
+
+Poly transpose(Poly matrix[MAX][MAX], int n, Poly transpose[MAX][MAX]) {
+
+    for (int i = 0; i < n; i++){
+        for (int j = 0; j < n; j++){
+            transpose[j][i] = matrix[i][j];
+
+        }
+    }
+}
+
+
+
+int check_symmetry(Poly matrix[MAX][MAX], int n, Poly skup_uslova[MAX][MAX]) {
+    int k = 0;
+    for (int i = 0; i < n; i++) {
+        for (int j = i + 1; j < n; j++) {
+            Poly diff = sub(matrix[i][j], matrix[j][i]);
+            Poly uslov = {.count = 0};
+            // Check if difference is actually 0
+            int all_zero = 1;
+            for (int t = 0; t < diff.count; t++) {
+                if (diff.terms[t].coeff != 0) {
+                    all_zero = 0;
+                    //printf("Difference NON.+++++++++++++++ZERO\n");
+                    break;
+                }
+            }
+            
+            if (diff.count == 0) {
+                all_zero = 1;
+            }
+            
+            if (!all_zero) {
+
+                int left_constant = (matrix[i][j].count == 1 && strlen(matrix[i][j].terms[0].vars) == 0);
+                int right_constant = (matrix[j][i].count == 1 && strlen(matrix[j][i].terms[0].vars) == 0);
+                
+                if (left_constant && right_constant) {
+
+                    printf("NOT SYMMETRIC at [%d][%d]: %d != %d (IMPOSSIBLE)\n", 
+                           i, j, matrix[i][j].terms[0].coeff, matrix[j][i].terms[0].coeff);
+                } else {
+
+                    uslov = sub(matrix[i][j], matrix[j][i]);
+                    skup_uslova[0][k] = uslov;
+                    
+                    k++;
+                }
+            }
+        }
+    }
+    return k;
+}
+
+void print_poly(Poly *p) {
+    if (p->count == 0) {
+        printf("0");
+        return;
+    }
+    
+    int first = 1;
+    for (int i = 0; i < p->count; i++) {
+        if (p->terms[i].coeff == 0) continue;
+        
+        if (!first && p->terms[i].coeff > 0) printf(" + ");
+        if (p->terms[i].coeff < 0) printf(" - ");
+        
+        int abs_c = abs(p->terms[i].coeff);
+        if (abs_c != 1 || strlen(p->terms[i].vars) == 0)
+            printf("%d", abs_c);
+        printf("%s", p->terms[i].vars);
+        if (p->terms[i].lambda_power > 0)
+            printf("l^%d", p->terms[i].lambda_power);
+        
+        first = 0;
+    }
+}
+
+
+void print_poly_matrix(Poly A[MAX][MAX], int n) {
+    for (int i = 0; i < n; i++) {
+        for (int j = 0; j < n; j++) {
+            printf("[");
+            print_poly(&A[i][j]);
+            printf("] ");
+        }
+        printf("\n");
+    }
+}
+
+void add_matrices(Poly A[MAX][MAX], Poly B[MAX][MAX], int n, Poly result[MAX][MAX]) {
+    for (int i = 0; i < n; i++) {
+        for (int j = 0; j < n; j++) {
+            result[i][j] = add(A[i][j], B[i][j]);
+        }
+    }
+}
+
+/* ---------- Print grouped by lambda powers ---------- */
+void printPolyGrouped(Poly p) {
+    int first = 1;
+    for (int lp = 0; lp <= MAX_LAMBDA; lp++) {
+        int has_terms = 0;
+        for (int i = 0; i < p.count; i++) {
+            if (p.terms[i].lambda_power == lp && p.terms[i].coeff != 0)
+                has_terms = 1;
+        }
+        if (!has_terms) continue;
+
+        if (!first) printf(" + ");
+        if (lp > 0) printf("    lambda^%d: ", lp);
+
+        int inner_first = 1;
+        for (int i = 0; i < p.count; i++) {
+            if (p.terms[i].lambda_power != lp || p.terms[i].coeff == 0)
+                continue;
+            if (!inner_first && p.terms[i].coeff > 0) printf(" + ");
+            if (p.terms[i].coeff < 0) printf(" - ");
+            float abs_c = abs(p.terms[i].coeff);
+            if (abs_c != 1 || strlen(p.terms[i].vars) == 0)
+                printf("%1.f", abs_c);
+            printf("%s", p.terms[i].vars);
+            inner_first = 0;
+        }
+        first = 0;
+    }
+    printf("\n");
+}
+
+
+
+
+void evaluate_polynomial(Poly *Q, LinearSolution *sol, int verbose) {
+    // Iterate over each variable that has a solution in 'sol'
+    for (int vi = 0; vi < sol->num_vars; ++vi) {
+        char var = sol->var_names[vi][0];
+        // If the variable name is actually the special 'lambda', skip it.
+        if (var == 'l') {
+            continue;  // We do not substitute λ as it's not solved via LinearSolution
+        }
+
+        // Determine the particular value of this variable from the solution
+        double part_value = sol->solution[vi][0];
+        // Determine if this solution has parameters (infinite solutions)
+        int has_params = (sol->num_params > 0 && sol->unique == 0);
+
+        // Loop through each term of Q (note: Q->count may grow if we add param terms)
+        int initial_term_count = Q->count;
+        for (int ti = 0; ti < initial_term_count; ++ti) {
+            Term *term = &Q->terms[ti];
+            // Check if this term contains the current variable 'var'
+            if (strchr(term->vars, var) == NULL) {
+                continue;  // variable not present in this term, skip
+            }
+
+
+
+            // If the variable has a solution
+            if (!has_params) {
+
+                term->coeff *= part_value;
+
+                remove_var(term->vars, var);
+
+            } else {
+                /* Parametric solution case */
+                int base_coeff = term->coeff;
+                // Particular part: multiply coefficient by particular value
+                term->coeff = base_coeff * part_value;
+                // Remove the variable from the vars string (it’s substituted out)
+                remove_var(term->vars, var);
+
+                for (int pi = 0; pi < sol->num_params; ++pi) {
+                    double param_coeff = sol->solution[vi][pi + 1];
+                    if (param_coeff == 0.0) {
+                        continue;
+                    }
+
+                    Term *newTerm = &Q->terms[Q->count];
+                    newTerm->coeff = base_coeff * param_coeff;
+
+                    strcpy(newTerm->vars, term->vars);
+
+                    size_t len = strlen(newTerm->vars);
+                    newTerm->vars[len] = sol->param_names[pi][0];
+                    newTerm->vars[len + 1] = '\0';
+
+                    newTerm->lambda_power = term->lambda_power;
+
+                    Q->count += 1;
+
+                }
+            }
+        } // end for each term
+    } // end for each variable in solution
+
+    // *Remove zero-valued terms* from Q
+    for (int i = 0; i < Q->count; /* no increment here */) {
+        if (Q->terms[i].coeff == 0) {
+
+            Q->terms[i] = Q->terms[Q->count - 1];
+            Q->count -= 1;
+
+        } else {
+            i++;
+        }
+    }
+}
+
+
+/* ---------- Build system of equations from conditions ---------- */
+void build_system_from_conditions(Poly conds[MAX][MAX], int num_conds, 
+                                   char vars_list[MAX_VARS][2], int *num_vars,
+                                   double system[MAX_EQS][MAX_VARS+1]) {
+    // Step 1: Collect all unique variables from conditions
+    *num_vars = 0;
+    
+    for (int i = 0; i < num_conds; i++) {
+        for (int j = 0; j < conds[0][i].count; j++) {
+            char *var_str = conds[0][i].terms[j].vars;
+            // Check if this term has a variable
+            if (var_str && strlen(var_str) > 0) {
+                // For single character variables
+                char var_char = var_str[0];
+                int found = 0;
+                for (int k = 0; k < *num_vars; k++) {
+                    if (vars_list[k][0] == var_char) {
+                        found = 1;
+                        break;
+                    }
+                }
+                if (!found && *num_vars < MAX_VARS) {
+                    vars_list[*num_vars][0] = var_char;
+                    vars_list[*num_vars][1] = '\0';
+                    (*num_vars)++;
+                }
+            }
+        }
+    }
+    
+    printf("Found %d unique variables\n", *num_vars);
+    
+    // Step 2: Build coefficient matrix (zero it out first)
+    for (int i = 0; i < MAX_EQS; i++) {
+        for (int j = 0; j < MAX_VARS + 1; j++) {
+            system[i][j] = 0.0;
+        }
+    }
+    
+    printf("Building system with %d conditions and %d variables\n", num_conds, *num_vars);
+    
+    for (int i = 0; i < num_conds; i++) {
+        //printf("  Processing condition %d (has %d terms)\n", i, conds[0][i].count);
+        for (int j = 0; j < conds[0][i].count; j++) {
+            char *var_str = conds[0][i].terms[j].vars;
+            int coeff = conds[0][i].terms[j].coeff;
+            //printf("    Term %d: coeff=%d, var_str='%s'\n", j, coeff, var_str);
+            
+            if (!var_str || strlen(var_str) == 0) {
+                // Constant term - goes to RHS
+                system[i][*num_vars] -= coeff;
+            } else {
+                // Find variable index - use first character
+                char var_char = var_str[0];
+                for (int k = 0; k < *num_vars; k++) {
+                    if (vars_list[k][0] == var_char) {
+                        system[i][k] += coeff;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    
+    //printf("System coefficients built\n");
+    //printf("About to print variables, num_vars=%d\n", *num_vars);
+    //fflush(stdout);
+    
+    //printf("Variables found: ");
+    //fflush(stdout);
+    //for (int i = 0; i < *num_vars; i++) {
+    //    printf("%c ", vars_list[i][0]);
+    //    fflush(stdout);
+    //}
+    //printf("\n");
+    //printf("Done!\n");
+    fflush(stdout);
+}
+
+/* ---------- Solve system of variable equations ---------- */
+LinearSolution solve_system_gauss(
+    double **matrix,
+    int num_eqs,
+    int num_vars,
+    char vars_list[MAX_VARS][2]
+) {
+    LinearSolution res;
+
+    res.num_vars = num_vars;
+    res.num_params = 0;
+    res.has_solution = 1;
+    res.unique = 0;
+
+    for (int i = 0; i < num_vars; i++) {
+        strcpy(res.var_names[i], vars_list[i]);
+        for (int j = 0; j <= MAX_PARAMS; j++)
+            res.solution[i][j] = 0.0;
+    }
+
+    int rank = 0;
+    int pivot_col_for_row[MAX_EQS];
+
+    /* ---------- Forward elimination ---------- */
+    for (int col = 0; col < num_vars && rank < num_eqs; col++) {
+        int pivot_row = rank;
+        for (int row = rank + 1; row < num_eqs; row++) {
+            if (fabs(matrix[row][col]) > fabs(matrix[pivot_row][col]))
+                pivot_row = row;
+        }
+
+        if (fabs(matrix[pivot_row][col]) < 1e-10)
+            continue;
+
+        if (pivot_row != rank) {
+            for (int j = 0; j <= num_vars; j++) {
+                double tmp = matrix[rank][j];
+                matrix[rank][j] = matrix[pivot_row][j];
+                matrix[pivot_row][j] = tmp;
+            }
+        }
+
+        for (int row = rank + 1; row < num_eqs; row++) {
+            double factor = matrix[row][col] / matrix[rank][col];
+            for (int j = col; j <= num_vars; j++)
+                matrix[row][j] -= factor * matrix[rank][j];
+        }
+
+        pivot_col_for_row[rank] = col;
+        rank++;
+    }
+
+    /* ---------- Check inconsistency ---------- */
+    for (int i = rank; i < num_eqs; i++) {
+        int all_zero = 1;
+        for (int j = 0; j < num_vars; j++) {
+            if (fabs(matrix[i][j]) > 1e-10) {
+                all_zero = 0;
+                break;
+            }
+        }
+        if (all_zero && fabs(matrix[i][num_vars]) > 1e-10) {
+            res.has_solution = 0;
+            return res;
+        }
+    }
+
+    /* ---------- Infinite solutions ---------- */
+    if (rank < num_vars) {
+        int is_pivot_col[MAX_VARS] = {0};
+        for (int r = 0; r < rank; r++)
+            is_pivot_col[pivot_col_for_row[r]] = 1;
+
+        int free_idx[MAX_VARS];
+        int fi = 0;
+        for (int c = 0; c < num_vars; c++)
+            if (!is_pivot_col[c])
+                free_idx[fi++] = c;
+
+        res.num_params = fi;
+        res.unique = 0;
+
+        for (int k = 0; k < fi; k++){
+            sprintf(res.param_names[k], "%c", parametri[k]);
+            }
+        /* particular solution (free vars = 0) */
+        double particular[MAX_VARS] = {0};
+
+        for (int r = rank - 1; r >= 0; r--) {
+            int pc = pivot_col_for_row[r];
+            double rhs = matrix[r][num_vars];
+            for (int j = pc + 1; j < num_vars; j++)
+                rhs -= matrix[r][j] * particular[j];
+            particular[pc] = rhs / matrix[r][pc];
+        }
+
+        /* basis vectors */
+        double basis[MAX_PARAMS][MAX_VARS] = {{0}};
+
+        for (int k = 0; k < fi; k++) {
+            int fv = free_idx[k];
+            basis[k][fv] = 1.0;
+
+            for (int r = rank - 1; r >= 0; r--) {
+                int pc = pivot_col_for_row[r];
+                double sum = 0.0;
+                for (int j = pc + 1; j < num_vars; j++)
+                    sum += matrix[r][j] * basis[k][j];
+                basis[k][pc] = -sum / matrix[r][pc];
+            }
+        }
+
+        /* store result */
+        for (int i = 0; i < num_vars; i++) {
+            res.solution[i][0] = particular[i];
+            for (int k = 0; k < fi; k++)
+                res.solution[i][k + 1] = basis[k][i];
+        }
+
+        return res;
+    }
+
+    /* ---------- Unique solution ---------- */
+    res.unique = 1;
+    res.num_params = 0;
+
+    double sol[MAX_VARS];
+
+    for (int i = num_vars - 1; i >= 0; i--) {
+        sol[i] = matrix[i][num_vars];
+        for (int j = i + 1; j < num_vars; j++)
+            sol[i] -= matrix[i][j] * sol[j];
+        sol[i] /= matrix[i][i];
+    }
+
+    for (int i = 0; i < num_vars; i++)
+        res.solution[i][0] = sol[i];
+
+    return res;
+}
+
+
+/* ---------- Main ---------- */
+int main() {
+    Poly A[MAX][MAX] = {
+        { variable('a'), variable('a'), constant(1) },
+        { variable('b'), variable('b'), variable('q') },
+        { variable('p'), constant(2), constant(3) },
+    };
+
+    Poly F[MAX][MAX] = {
+        { variable('a'), variable('a'), constant(1) },
+        { variable('b'), variable('b'), variable('q') },
+        { constant(1), variable('p'), constant(3) },
+    };
+
+    Poly B[MAX][MAX] = {
+        { variable('q'), variable('r'), variable('n'), constant(4) },
+        { variable('r'), variable('q'), constant(3), variable('m') },
+        { variable('b'), variable('q'), variable('q'), constant(2) },
+        { constant(0), constant(4), constant(1), variable('n') }
+    };
+
+
+
+    //gaussian_elimination(a, N);
+
+    int n = 3;
+    Poly M[MAX][MAX];
+
+    /* Build A - λI */
+    for (int i = 0; i < n; i++)
+        for (int j = 0; j < n; j++)
+            if (i == j)
+                M[i][j] = sub(A[i][j], variable('l')); // diagonal minus λ
+            else
+                M[i][j] = A[i][j];
+
+    Poly R[MAX][MAX];
+    add_matrices(A, B, n, R);
+    
+    //Poly charpoly = determinant(M, n);
+
+    //printf("Characteristic polynomial (grouped by lambda powers):\n");
+    //printPolyGrouped(charpoly);
+
+    Poly T[MAX][MAX];
+    transpose(A,n,T);
+    printf("\n");
+    print_poly_matrix(A,n);
+    printf("\n");
+    
+
+    Poly conds[MAX][MAX];
+    int num_conds = check_symmetry(A, n, conds);
+
+    printf("\n===== SOLVING CONDITIONS SYSTEM =====\n");
+    printf("Number of conditions found: %d\n", num_conds);
+    
+    // Debug: print all conditions
+    printf("\nConditions:\n");
+    for (int i = 0; i < num_conds; i++) {
+        printf("Condition %d: ", i);
+        print_poly(&conds[0][i]);
+        printf("\n");
+    }
+    printf("\n");
+    
+    // Build system of equations from conditions
+    char vars_list[MAX_VARS][2];
+    int num_vars = 0;
+    double system[MAX_EQS][MAX_VARS+1];
+    
+    build_system_from_conditions(conds, num_conds, vars_list, &num_vars, system);
+    
+    //printf("\nNumber of variables found: %d\n", num_vars);
+    printf("Solving for variables: ");
+    for (int i = 0; i < num_vars; i++) {
+        printf("%s ", vars_list[i]);
+    }
+    printf("\n\n");
+    LinearSolution sol;
+    // Solve the system using Gaussian elimination
+    if (num_conds > 0 && num_vars > 0) {
+        // Create a properly sized matrix for elimination
+        double *elim_matrix[num_conds];
+        for (int i = 0; i < num_conds; i++) {
+            elim_matrix[i] = malloc((num_vars + 1) * sizeof(double));
+            for (int j = 0; j <= num_vars; j++) {
+                elim_matrix[i][j] = system[i][j];
+            }
+        }
+        
+        // Print the coefficient matrix
+        printf("Coefficient matrix:\n");
+        for (int i = 0; i < num_conds; i++) {
+            for (int j = 0; j <= num_vars; j++) {
+                printf("%8.2f ", elim_matrix[i][j]);
+            }
+            printf("\n");
+        }
+        printf("\n");
+        
+        // Solve using Gaussian elimination
+        sol = solve_system_gauss(elim_matrix, num_conds, num_vars, vars_list);
+
+        
+        // Free memory
+        for (int i = 0; i < num_conds; i++) {
+            free(elim_matrix[i]);
+        }
+    } else {
+        printf("Cannot solve: no conditions or no variables found.\n");
+    }
+
+    Poly charpoly = determinant(M, n);
+
+    printf("Characteristic polynomial (grouped by lambda powers):\n");
+    printPolyGrouped(charpoly);
+
+    Poly P = charpoly;
+    simplify(&P);
+
+    //Poly R[MAX];
+
+
+    if (!sol.has_solution) {
+    printf("System is inconsistent (no solution)\n");
+    }
+    else if (sol.unique) {
+    printf("UNIQUE SOLUTION:\n");
+    for (int i = 0; i < sol.num_vars; i++) {
+        printf("%s = %.4f\n", sol.var_names[i], sol.solution[i][0]);
+    }
+    }
+    else {
+    printf("INFINITE SOLUTIONS:\n\n");
+
+    for (int i = 0; i < sol.num_vars; i++) {
+        printf("%s = %.4f", sol.var_names[i], sol.solution[i][0]);
+
+
+        for (int k = 0; k < sol.num_params; k++) {
+            double c = sol.solution[i][k + 1];
+            if (fabs(c) > 1e-12)
+                printf(" + (%.4f)*%s", c, sol.param_names[k]);
+        }
+        printf("\n");
+  
+    }
+    }
+
+    Poly Q;
+    // ----------------------
+
+    for (int j = 0; j < P.count; j++) {
+        Q.terms[j].coeff = P.terms[j].coeff;
+        strcpy(Q.terms[j].vars, P.terms[j].vars);
+        Q.terms[j].lambda_power = P.terms[j].lambda_power;
+        Q.count++;
+    }
+    
+    
+
+
+
+
+    //-------------------------
+    evaluate_polynomial(&Q, &sol, 1);
+    printf("\nPolynomial Q (after substitution, grouped by lambda powers):\n");
+    simplify(&Q);
+    printPolyGrouped(Q);
+    return 0;
+}
